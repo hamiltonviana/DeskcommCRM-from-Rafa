@@ -23992,6 +23992,340 @@ create trigger trg_org_voice_calls_set_updated_at
 
 notify pgrst, 'reload schema';
 
+-- ---- rodízio de leads por grupo (90001..90003) ----
+-- Quatro tabelas + gatilho AFTER INSERT em crm_leads (só lead de formulário, source='webhook') + gravação atômica dos membros.
+-- Cabeçalho das migrations 90001..90003 para o racional inteiro. Opt-in: sem regra, o gatilho não faz nada.
+-- Fica ANTES da varredura de anon: as funções são revogadas de anon por conta própria.
+
+-- ---- grupos ----
+create table if not exists public.lead_routing_groups (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations (id) on delete cascade,
+  name text not null check (length(btrim(name)) between 1 and 120),
+  pipeline_id uuid references public.crm_pipelines (id) on delete cascade,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint lead_routing_groups_id_org_uniq unique (id, organization_id)
+);
+
+create unique index if not exists lead_routing_groups_org_name_uniq
+  on public.lead_routing_groups (organization_id, lower(btrim(name)));
+
+-- ---- membros (quem está no grupo e em que ordem) ----
+create table if not exists public.lead_routing_group_members (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations (id) on delete cascade,
+  group_id uuid not null,
+  user_id uuid not null references auth.users (id) on delete cascade,
+  position integer not null default 0 check (position >= 0),
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  constraint lead_routing_group_members_group_fk
+    foreign key (group_id, organization_id)
+    references public.lead_routing_groups (id, organization_id) on delete cascade,
+  constraint lead_routing_group_members_group_user_uniq unique (group_id, user_id)
+);
+
+create index if not exists lead_routing_group_members_group_idx
+  on public.lead_routing_group_members (group_id, active, position, user_id);
+
+-- ---- regras (liga a origem do lead a um grupo) ----
+create table if not exists public.lead_routing_rules (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations (id) on delete cascade,
+  group_id uuid not null,
+  match_type text not null check (match_type in ('webhook_source', 'utm_campaign', 'pipeline')),
+  match_value text not null check (length(btrim(match_value)) > 0),
+  priority integer not null default 100,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  constraint lead_routing_rules_group_fk
+    foreign key (group_id, organization_id)
+    references public.lead_routing_groups (id, organization_id) on delete cascade,
+  constraint lead_routing_rules_match_uniq unique (organization_id, match_type, match_value)
+);
+
+create index if not exists lead_routing_rules_org_active_idx
+  on public.lead_routing_rules (organization_id, active, priority, created_at);
+
+-- ---- histórico do rodízio (de onde o "próximo" é calculado) ----
+create table if not exists public.lead_routing_assignments (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations (id) on delete cascade,
+  group_id uuid not null,
+  lead_id uuid not null references public.crm_leads (id) on delete cascade,
+  user_id uuid not null,
+  member_position integer not null,
+  rule_id uuid references public.lead_routing_rules (id) on delete set null,
+  -- clock_timestamp() e não now(): now() é o início da TRANSAÇÃO, igual para
+  -- duas atribuições na mesma, e o "último" do grupo sai desta ordenação.
+  created_at timestamptz not null default clock_timestamp(),
+  constraint lead_routing_assignments_group_fk
+    foreign key (group_id, organization_id)
+    references public.lead_routing_groups (id, organization_id) on delete cascade,
+  constraint lead_routing_assignments_lead_uniq unique (lead_id)
+);
+
+create index if not exists lead_routing_assignments_group_recent_idx
+  on public.lead_routing_assignments (group_id, created_at desc, id desc);
+
+-- ---- RLS: leitura para quem é da organização; escrita manager+ (config) ----
+alter table public.lead_routing_groups enable row level security;
+alter table public.lead_routing_group_members enable row level security;
+alter table public.lead_routing_rules enable row level security;
+alter table public.lead_routing_assignments enable row level security;
+
+drop policy if exists tenant_isolation_lead_routing_groups_select on public.lead_routing_groups;
+create policy tenant_isolation_lead_routing_groups_select on public.lead_routing_groups
+  for select using (organization_id in (select public.fn_user_org_ids()) or public.fn_is_platform_admin());
+drop policy if exists lead_routing_groups_write on public.lead_routing_groups;
+create policy lead_routing_groups_write on public.lead_routing_groups
+  for all
+  using (organization_id in (select public.fn_user_org_ids())
+         and public.fn_role_at_least(organization_id, 'manager')
+         and public.fn_support_write_allowed(organization_id))
+  with check (organization_id in (select public.fn_user_org_ids())
+         and public.fn_role_at_least(organization_id, 'manager')
+         and public.fn_support_write_allowed(organization_id));
+
+drop policy if exists tenant_isolation_lead_routing_group_members_select on public.lead_routing_group_members;
+create policy tenant_isolation_lead_routing_group_members_select on public.lead_routing_group_members
+  for select using (organization_id in (select public.fn_user_org_ids()) or public.fn_is_platform_admin());
+drop policy if exists lead_routing_group_members_write on public.lead_routing_group_members;
+create policy lead_routing_group_members_write on public.lead_routing_group_members
+  for all
+  using (organization_id in (select public.fn_user_org_ids())
+         and public.fn_role_at_least(organization_id, 'manager')
+         and public.fn_support_write_allowed(organization_id))
+  with check (organization_id in (select public.fn_user_org_ids())
+         and public.fn_role_at_least(organization_id, 'manager')
+         and public.fn_support_write_allowed(organization_id));
+
+drop policy if exists tenant_isolation_lead_routing_rules_select on public.lead_routing_rules;
+create policy tenant_isolation_lead_routing_rules_select on public.lead_routing_rules
+  for select using (organization_id in (select public.fn_user_org_ids()) or public.fn_is_platform_admin());
+drop policy if exists lead_routing_rules_write on public.lead_routing_rules;
+create policy lead_routing_rules_write on public.lead_routing_rules
+  for all
+  using (organization_id in (select public.fn_user_org_ids())
+         and public.fn_role_at_least(organization_id, 'manager')
+         and public.fn_support_write_allowed(organization_id))
+  with check (organization_id in (select public.fn_user_org_ids())
+         and public.fn_role_at_least(organization_id, 'manager')
+         and public.fn_support_write_allowed(organization_id));
+
+-- O histórico só é escrito pelo gatilho (security definer): ninguém grava por REST.
+drop policy if exists tenant_isolation_lead_routing_assignments_select on public.lead_routing_assignments;
+create policy tenant_isolation_lead_routing_assignments_select on public.lead_routing_assignments
+  for select using (organization_id in (select public.fn_user_org_ids()) or public.fn_is_platform_admin());
+
+revoke all on public.lead_routing_groups, public.lead_routing_group_members,
+              public.lead_routing_rules, public.lead_routing_assignments from anon, authenticated;
+grant select, insert, update, delete on public.lead_routing_groups,
+              public.lead_routing_group_members, public.lead_routing_rules to authenticated;
+grant select on public.lead_routing_assignments to authenticated;
+grant all on public.lead_routing_groups, public.lead_routing_group_members,
+             public.lead_routing_rules, public.lead_routing_assignments to service_role;
+
+-- ---- quem é o próximo do grupo (calculado do histórico) ----
+create or replace function public.fn_lead_routing_next(p_org uuid, p_group uuid)
+returns table (user_id uuid, member_position integer)
+language plpgsql
+security definer
+set search_path to 'public'
+as $function$
+declare
+  v_last_pos integer;
+  v_last_user uuid;
+begin
+  perform pg_advisory_xact_lock(hashtextextended('lead_routing:' || p_group::text, 2041));
+
+  select a.member_position, a.user_id
+    into v_last_pos, v_last_user
+    from public.lead_routing_assignments a
+   where a.group_id = p_group and a.organization_id = p_org
+   order by a.created_at desc, a.id desc
+   limit 1;
+
+  return query
+    select m.user_id, m.position
+      from public.lead_routing_group_members m
+      join public.user_organizations uo
+        on uo.user_id = m.user_id
+       and uo.organization_id = p_org
+       and uo.revoked_at is null
+       and uo.role in ('agent', 'manager', 'admin')
+     where m.group_id = p_group
+       and m.organization_id = p_org
+       and m.active
+     order by
+       case
+         when v_last_pos is null then 0
+         when (m.position, m.user_id) > (v_last_pos, v_last_user) then 0
+         else 1
+       end,
+       m.position,
+       m.user_id
+     limit 1;
+end;
+$function$;
+
+-- ---- o gatilho: dá o dono ao lead novo quando uma regra casa ----
+create or replace function public.fn_lead_routing_on_insert()
+returns trigger
+language plpgsql
+security definer
+set search_path to 'public'
+as $function$
+declare
+  v_rule record;
+  v_next record;
+  v_rows integer;
+begin
+  select r.id as rule_id, r.group_id
+    into v_rule
+    from public.lead_routing_rules r
+    join public.lead_routing_groups g
+      on g.id = r.group_id and g.organization_id = r.organization_id
+   where r.organization_id = new.organization_id
+     and r.active
+     and g.active
+     and (g.pipeline_id is null or g.pipeline_id = new.pipeline_id)
+     and (
+          (r.match_type = 'webhook_source' and r.match_value = new.source_metadata ->> 'webhook_source_id')
+       or (r.match_type = 'utm_campaign'   and r.match_value = new.source_metadata ->> 'utm_campaign')
+       or (r.match_type = 'pipeline'       and r.match_value = new.pipeline_id::text)
+     )
+   order by r.priority asc, r.created_at asc, r.id asc
+   limit 1;
+
+  if v_rule.rule_id is null then
+    return null;
+  end if;
+
+  select n.user_id, n.member_position
+    into v_next
+    from public.fn_lead_routing_next(new.organization_id, v_rule.group_id) n;
+
+  if v_next.user_id is null then
+    return null;
+  end if;
+
+  update public.crm_leads
+     set owner_user_id = v_next.user_id,
+         owner_kind = 'user',
+         assigned_at = now()
+   where id = new.id
+     and organization_id = new.organization_id
+     and owner_user_id is null
+     and owner_agent_id is null;
+  get diagnostics v_rows = row_count;
+
+  if v_rows = 1 then
+    insert into public.lead_routing_assignments
+      (organization_id, group_id, lead_id, user_id, member_position, rule_id)
+    values
+      (new.organization_id, v_rule.group_id, new.id, v_next.user_id, v_next.member_position, v_rule.rule_id);
+  end if;
+
+  return null;
+exception
+  when others then
+    raise warning 'fn_lead_routing_on_insert: lead % sem rodizio (%)', new.id, sqlerrm;
+    return null;
+end;
+$function$;
+
+revoke all on function public.fn_lead_routing_next(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.fn_lead_routing_on_insert() from public, anon, authenticated;
+grant execute on function public.fn_lead_routing_next(uuid, uuid) to service_role;
+
+drop trigger if exists trg_lead_routing_on_insert on public.crm_leads;
+create trigger trg_lead_routing_on_insert
+  after insert on public.crm_leads
+  for each row
+  when (new.owner_user_id is null and new.owner_agent_id is null and new.status = 'open')
+  execute function public.fn_lead_routing_on_insert();
+
+drop trigger if exists trg_lead_routing_on_insert on public.crm_leads;
+create trigger trg_lead_routing_on_insert
+  after insert on public.crm_leads
+  for each row
+  when (new.owner_user_id is null and new.owner_agent_id is null
+        and new.status = 'open' and new.source = 'webhook')
+  execute function public.fn_lead_routing_on_insert();
+
+create or replace function public.fn_set_lead_routing_members(p_org uuid, p_group uuid, p_members jsonb)
+returns integer
+language plpgsql
+security invoker
+set search_path to 'public'
+as $function$
+declare
+  v_total integer;
+  v_distintos integer;
+  v_invalidos integer;
+begin
+  -- Mesma régua da RLS de escrita (manager+): recusa com 42501 em vez de deixar o
+  -- agent chegar a um DELETE que a RLS esvaziaria em silêncio.
+  if not public.fn_role_at_least(p_org, 'manager') then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+
+  if not exists (
+    select 1 from public.lead_routing_groups g
+     where g.id = p_group and g.organization_id = p_org
+  ) then
+    raise exception 'group_not_found' using errcode = 'P0002';
+  end if;
+
+  if jsonb_typeof(p_members) is distinct from 'array' then
+    raise exception 'members_must_be_array' using errcode = '22023';
+  end if;
+
+  select count(*), count(distinct (e.value ->> 'user_id'))
+    into v_total, v_distintos
+    from jsonb_array_elements(p_members) as e(value);
+  if v_total <> v_distintos then
+    raise exception 'duplicate_member' using errcode = '22023';
+  end if;
+
+  select count(*)
+    into v_invalidos
+    from jsonb_array_elements(p_members) as e(value)
+   where not exists (
+     select 1 from public.user_organizations uo
+      where uo.organization_id = p_org
+        and uo.user_id = (e.value ->> 'user_id')::uuid
+        and uo.revoked_at is null
+        and uo.role in ('agent', 'manager', 'admin')
+   );
+  if v_invalidos > 0 then
+    raise exception 'member_not_eligible' using errcode = '22023';
+  end if;
+
+  delete from public.lead_routing_group_members m
+   where m.group_id = p_group
+     and m.organization_id = p_org
+     and m.user_id not in (
+       select (e.value ->> 'user_id')::uuid from jsonb_array_elements(p_members) as e(value)
+     );
+
+  insert into public.lead_routing_group_members (organization_id, group_id, user_id, position, active)
+  select p_org, p_group, (e.value ->> 'user_id')::uuid, (e.ord - 1)::integer,
+         coalesce((e.value ->> 'active')::boolean, true)
+    from jsonb_array_elements(p_members) with ordinality as e(value, ord)
+  on conflict (group_id, user_id)
+  do update set position = excluded.position, active = excluded.active;
+
+  return v_total;
+end;
+$function$;
+
+revoke all on function public.fn_set_lead_routing_members(uuid, uuid, jsonb) from public, anon;
+grant execute on function public.fn_set_lead_routing_members(uuid, uuid, jsonb) to authenticated, service_role;
+
 -- ---- VARREDURA anon: função nova nasce exposta em quem ATUALIZA (migration 0116) ----
 --
 -- ⚠️ ESTE BLOCO É, DE PROPÓSITO, O ÚLTIMO DO ARQUIVO. Apêndice novo entra ANTES

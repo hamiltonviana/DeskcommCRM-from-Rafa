@@ -585,6 +585,17 @@ export const NAV_CATALOG = [
     minRole: "manager",
   },
   {
+    // Rodízio de LEAD de formulário (90001..90003): quem recebe cada lead que chega
+    // por Meta Lead Ads/Elementor/RD Station, que nasce sem conversa.
+    href: "/app/settings/rodizio-de-leads",
+    label: "Rodízio de leads",
+    description: "Reparte os leads dos formulários, na ordem, entre as pessoas de cada grupo.",
+    icon: "UsersThree",
+    group: "organizacao",
+    section: "Sua empresa",
+    minRole: "manager",
+  },
+  {
     href: "/app/settings/tenant",
     label: "Organização",
     description: "Dados da empresa, retenção de dados e encarregado de LGPD.",
