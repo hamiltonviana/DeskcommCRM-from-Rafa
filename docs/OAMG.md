@@ -45,3 +45,17 @@ git merge v1.XX.0        # na branch oamg
 
 ## Ponte da Meta (n8n)
 Workflow **"Meta Lead Ads → CRM OAMG (rodízio de leads)"** (`0Th99EnhZXpQKbPb`): a cada 2 min lê os leads de cada formulário da Página e envia para a fonte de webhook do CRM (`/api/v1/webhooks/in/<token>`), com `external_id = meta_<id>` (o CRM deduplica). Nasce inativo; edite o nó **Config** (formulário → token da fonte) e ative. Na 1ª execução marca o instante da ativação e **não importa histórico**.
+
+## Organização da Flávia Brugnara (08/10/2026)
+Criada em produção com `scripts/oamg/criar-org-flavia.sql` (replica `fn_create_tenant_with_owner`, que exige platform_admin — a instalação não tem nenhum). Slug `flavia-brugnara`; `settings.visibility_mode = 'own'` (cada corretora vê só os próprios leads; a gestora/admin vê todos); funil **Leads dos corretores** com as mesmas etapas do retorno da Roleta (Novo, Não atendeu, Atendeu, Visita marcada, Proposta, Fechou, Sem interesse). Hamilton é admin; Flávia é admin; corretoras são `agent` com interface simplificada (kanban, contatos, tarefas, agenda).
+
+**Convites sem e-mail:** o SQL cria as linhas em `team_invites` (`email_dispatched=false`, validade 7 dias). Os links saem de `scripts/oamg/gerar-links-convite.mjs`, que roda **dentro do container do app** (o segredo de assinatura nunca sai do servidor) com a mesma assinatura de `linkDeAceite`. Os links ficam num arquivo local do Hamilton, nunca no Git.
+
+```bash
+# no servidor: monta o JSON dos convites em aberto e assina os links dentro do container
+docker cp gerar-links-convite.mjs $(docker ps -q -f name=crm_app):/tmp/gerar.mjs
+docker exec $(docker ps -q -f name=crm_app) node /tmp/gerar.mjs /tmp/convites.json
+```
+
+## Papel do CRM em relação à Roleta (decisão de 08/10/2026)
+**A Roleta (planilha + n8n) continua sendo o motor** que decide quem recebe cada lead (menor ciclo, repasse após 30 min úteis, Sarutaiá por conjunto, lead repetido). O CRM é a **cara**: a corretora vê "meus leads" no celular, recebe o push "lead atribuído a você" e marca status/temperatura/observação. A Roleta **não é alterada** até o Hamilton autorizar a troca.
