@@ -66,3 +66,11 @@ docker exec $(docker ps -q -f name=crm_app) node /tmp/gerar.mjs /tmp/convites.js
 - A tela mostra a **prévia** (`dry_run`) antes de confirmar. API: `POST /api/v1/settings/lead-routing/members/:userId/leave`.
 - **Pausar** (folga/férias) é outra ação: não revoga nem mexe nos leads.
 - Conversas de WhatsApp atribuídas à pessoa que sai **não** são redistribuídas por esta função (só leads).
+
+### Estado de produção — atualizado em 09/10/2026
+| Item | Estado |
+|---|---|
+| Migrations `90001`–`90003` (rodízio de leads por grupo, só lead de formulário, grava membros) | **Aplicadas** (05/10) |
+| Migration `90004` (saída de corretor + histórico) | **Aplicada em 09/10/2026**, com `lock_timeout` de 5 s, em transação, depois de provada em transação revertida no schema real. Volta atrás: `scripts/oamg/desfazer-90004.sql` (apaga o histórico `lead_ownership_events`; exporte antes se já houver registros). |
+| Imagem do app | Em produção: `deskcomm-oamg:1.20.0-oamg.1` (sem a seção Equipe). **Construída e ainda não publicada:** `1.20.0-oamg.2` (tela Equipe + API de saída). A página tolera a 90004 ausente, e a 90004 sem a imagem nova não muda nada visível. |
+| Organização `flavia-brugnara` | Criada; 10 convites pendentes (links só no arquivo local do Hamilton). Ainda sem leads: a Roleta continua sendo o motor. |
