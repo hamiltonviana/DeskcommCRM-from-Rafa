@@ -59,3 +59,10 @@ docker exec $(docker ps -q -f name=crm_app) node /tmp/gerar.mjs /tmp/convites.js
 
 ## Papel do CRM em relação à Roleta (decisão de 08/10/2026)
 **A Roleta (planilha + n8n) continua sendo o motor** que decide quem recebe cada lead (menor ciclo, repasse após 30 min úteis, Sarutaiá por conjunto, lead repetido). O CRM é a **cara**: a corretora vê "meus leads" no celular, recebe o push "lead atribuído a você" e marca status/temperatura/observação. A Roleta **não é alterada** até o Hamilton autorizar a troca.
+
+## Saída de corretor e histórico (90004, 09/10/2026) — regras combinadas com o Hamilton
+- **"Não atendeu no prazo"** é um fato do **histórico do corretor** (`lead_ownership_events`): o corretor não registrou retorno no prazo e o lead passou para outra pessoa. **Não** é a etapa do funil "Não atendeu" (essa significa: o corretor tentou e o *lead* não respondeu). Hoje quem decide o prazo é a Roleta (n8n, 30 min úteis, só leads com status Novo); quando a Roleta alimentar o CRM, ela chama `fn_lead_repass(..., 'nao_atendeu_no_prazo')` para gravar o histórico. Dado de partida (planilha em 08/10): 8 de 13 leads foram repassados por falta de registro.
+- **Tirar da equipe** (`fn_member_leave`, só admin; tela Rodízio de leads → Equipe): revoga o acesso e redistribui na mesma transação. Etapas com slug `novo` e `nao_atendeu` → divididas entre as `agent` ativas pelo **menor número de leads em aberto**; qualquer outra etapa em aberto (Atendeu, Visita marcada, Proposta…) → **volta para a gestora** escolhida; fechados não mudam. Organização sem essas etapas → tudo volta para a gestora (padrão seguro). Cada lead movido é gravado por UPDATE, então o novo dono recebe o push.
+- A tela mostra a **prévia** (`dry_run`) antes de confirmar. API: `POST /api/v1/settings/lead-routing/members/:userId/leave`.
+- **Pausar** (folga/férias) é outra ação: não revoga nem mexe nos leads.
+- Conversas de WhatsApp atribuídas à pessoa que sai **não** são redistribuídas por esta função (só leads).

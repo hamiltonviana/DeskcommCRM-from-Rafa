@@ -14,10 +14,12 @@ import { redirect } from "next/navigation";
 import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
 import { ROLE_RANK } from "@/lib/auth/types";
 import { traduzir } from "@/lib/i18n/dicionario";
+import { loadEquipe } from "@/lib/lead-routing/equipe";
 import { loadLeadRoutingSettings } from "@/lib/lead-routing/settings";
 import { createClient } from "@/lib/supabase/server";
 
 import { LeadRoutingClient } from "./_client";
+import { EquipeClient } from "./_equipe";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +31,12 @@ export default async function RodizioDeLeadsPage() {
     redirect("/403");
   }
 
-  const initial = await loadLeadRoutingSettings(await createClient(), activeOrg.orgId);
+  const db = await createClient();
+  const [initial, equipe] = await Promise.all([
+    loadLeadRoutingSettings(db, activeOrg.orgId),
+    loadEquipe(db, activeOrg.orgId),
+  ]);
+  const souAdmin = ROLE_RANK[activeOrg.role] >= ROLE_RANK.admin;
   const idioma = user.idioma;
 
   return (
@@ -44,6 +51,7 @@ export default async function RodizioDeLeadsPage() {
         </p>
       </header>
       <LeadRoutingClient initial={initial} />
+      <EquipeClient initial={equipe} souAdmin={souAdmin} meuId={user.id} />
     </div>
   );
 }

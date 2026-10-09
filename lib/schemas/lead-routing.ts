@@ -38,3 +38,9 @@ export const leadRoutingRuleCreateSchema = z.discriminatedUnion("match_type", [
 export const leadRoutingRulePatchSchema = z.object({ active: z.boolean() });
 
 export type LeadRoutingRuleCreate = z.infer<typeof leadRoutingRuleCreateSchema>;
+
+/** Saída de corretor (90004): a gestora que fica com os leads em andamento; dry_run só conta. */
+export const leadRoutingLeaveSchema = z.object({
+  gestor_id: uuid,
+  dry_run: z.boolean().default(false),
+});
