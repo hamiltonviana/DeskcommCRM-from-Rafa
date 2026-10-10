@@ -11,6 +11,19 @@ interface Previa {
   divididos: number;
   com_a_gestora: number;
   sem_mudanca: number;
+  motivos?: { em_andamento: number; equipe_com_verba_propria: number; sem_destino_no_empreendimento: number };
+}
+
+/** Por que cada lead volta para a gestora, só com o que for maior que zero. */
+function motivosTexto(p: Previa, t: (s: string) => string): string {
+  const m = p.motivos;
+  if (!m) return "";
+  const partes = [
+    m.em_andamento ? `${m.em_andamento} ${t("em andamento (Atendeu, Visita marcada, Proposta)")}` : "",
+    m.equipe_com_verba_propria ? `${m.equipe_com_verba_propria} ${t("de equipe com verba própria")}` : "",
+    m.sem_destino_no_empreendimento ? `${m.sem_destino_no_empreendimento} ${t("sem outra corretora do empreendimento disponível")}` : "",
+  ].filter(Boolean);
+  return partes.length ? `(${partes.join("; ")})` : "";
 }
 
 const PAPEL: Record<EquipeMembro["role"], string> = { agent: "Corretor(a)", manager: "Gerente", admin: "Administrador(a)" };
@@ -131,7 +144,7 @@ export function EquipeClient({ initial, souAdmin, meuId }: { initial: EquipeData
         <div className="rounded-md border border-destructive/40 p-4 space-y-3" role="group" aria-label={t("Tirar da equipe")} data-testid="equipe-saida">
           <h3 className="font-medium">{t("Tirar da equipe:")} {saindo.name}</h3>
           <label className="flex flex-wrap items-center gap-2 text-sm">
-            {t("Quem fica com os leads em andamento (Atendeu, Visita marcada, Proposta)?")}
+            {t("Quem fica com os leads que voltam para a gestora?")}
             <select
               className="rounded-md border bg-background px-3 py-2 text-sm"
               value={gestorId}
@@ -149,8 +162,8 @@ export function EquipeClient({ initial, souAdmin, meuId }: { initial: EquipeData
           </label>
           {previa ? (
             <ul className="list-disc pl-5 text-sm space-y-1" data-testid="equipe-previa">
-              <li>{previa.divididos} {t("leads em Novo ou Não atendeu serão divididos entre as corretoras ativas, começando por quem tem menos leads em aberto.")}</li>
-              <li>{previa.com_a_gestora} {t("leads em andamento voltam para a gestora escolhida.")}</li>
+              <li>{previa.divididos} {t("leads em Novo ou Não atendeu serão divididos entre as corretoras do mesmo empreendimento, começando por quem tem menos leads em aberto.")}</li>
+              <li>{previa.com_a_gestora} {t("leads voltam para a gestora escolhida")} {motivosTexto(previa, t)}</li>
               <li>{previa.sem_mudanca} {t("leads fechados não mudam de dono.")}</li>
               <li>{t("A pessoa perde o acesso ao CRM agora. Quem recebe um lead é avisado.")}</li>
             </ul>

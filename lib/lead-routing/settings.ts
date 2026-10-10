@@ -9,6 +9,7 @@ export interface LeadRoutingSettings {
     id: string;
     name: string;
     active: boolean;
+    saida_para_gestora: boolean;
     members: Array<{ user_id: string; name: string; position: number; active: boolean; eligible: boolean }>;
     rules: Array<{
       id: string;
@@ -32,7 +33,7 @@ const PAPEIS_ELEGIVEIS = ["agent", "manager", "admin"];
 
 export async function loadLeadRoutingSettings(db: SupabaseClient, org: string): Promise<LeadRoutingSettings> {
   const results = await Promise.all([
-    db.from("lead_routing_groups").select("id, name, active").eq("organization_id", org).order("created_at"),
+    db.from("lead_routing_groups").select("id, name, active, saida_para_gestora").eq("organization_id", org).order("created_at"),
     db.from("lead_routing_group_members").select("group_id, user_id, position, active").eq("organization_id", org).order("position"),
     db.from("lead_routing_rules").select("id, group_id, match_type, match_value, priority, active").eq("organization_id", org).order("priority").order("created_at"),
     db.from("user_organizations").select("user_id").eq("organization_id", org).is("revoked_at", null).in("role", PAPEIS_ELEGIVEIS),
@@ -69,6 +70,7 @@ export async function loadLeadRoutingSettings(db: SupabaseClient, org: string): 
       id: String(g.id),
       name: String(g.name),
       active: Boolean(g.active),
+      saida_para_gestora: Boolean(g.saida_para_gestora),
       members: members
         .filter((m) => m.group_id === g.id)
         .map((m) => ({

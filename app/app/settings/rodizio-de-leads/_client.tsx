@@ -80,7 +80,7 @@ export function LeadRoutingClient({ initial }: { initial: LeadRoutingSettings })
       <section className="rounded-lg border p-4 space-y-3" aria-labelledby="novo-grupo-titulo">
         <h2 id="novo-grupo-titulo" className="text-lg font-semibold">{t("Novo grupo")}</h2>
         <p className="text-sm text-muted-foreground">
-          {t("Um grupo é uma equipe que reveza os leads de um ou mais formulários. Ex.: o time de um empreendimento.")}
+          {t("Um grupo é a equipe de um empreendimento. Use o MESMO nome do empreendimento (ex.: Alves Guimarães): é por ele que a saída de uma corretora sabe quem pode receber os leads dela.")}
         </p>
         <div className="flex flex-wrap gap-2">
           <input
@@ -124,6 +124,17 @@ export function LeadRoutingClient({ initial }: { initial: LeadRoutingSettings })
                 <p className="text-xs text-muted-foreground">
                   {group.active ? t("Grupo ativo: recebe os leads das origens ligadas abaixo.") : t("Grupo pausado: não recebe leads novos.")}
                 </p>
+                <label className="mt-1 flex items-center gap-2 text-xs" data-testid="lead-routing-verba-propria">
+                  <input
+                    type="checkbox"
+                    checked={group.saida_para_gestora}
+                    disabled={busy}
+                    onChange={(e) =>
+                      void chamar(`${BASE}/${group.id}`, "PATCH", { saida_para_gestora: e.target.checked }, "Regra de saída salva.")
+                    }
+                  />
+                  {t("Equipe com verba própria: quando alguém sair, os leads novos dela voltam para a gestora em vez de serem divididos.")}
+                </label>
               </div>
               <div className="flex gap-2">
                 <Button

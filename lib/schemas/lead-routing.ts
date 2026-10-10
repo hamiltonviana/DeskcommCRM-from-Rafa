@@ -14,8 +14,10 @@ export const leadRoutingGroupPatchSchema = z
   .object({
     name: z.string().trim().min(1).max(120).optional(),
     active: z.boolean().optional(),
+    /** Equipe com verba própria: na saída de alguém, Novo/Não atendeu voltam para a gestora em vez de serem divididos. */
+    saida_para_gestora: z.boolean().optional(),
   })
-  .refine((v) => v.name !== undefined || v.active !== undefined, { message: "Nada para alterar." });
+  .refine((v) => v.name !== undefined || v.active !== undefined || v.saida_para_gestora !== undefined, { message: "Nada para alterar." });
 
 export const leadRoutingMembersSchema = z
   .object({

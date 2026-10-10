@@ -12,9 +12,10 @@ import {
 } from "./gov-helpers";
 
 /**
- * Saída de corretor com redistribuição (migration 90004).
- * Admin tira a corretora A: leads em Novo/Não atendeu são divididos entre as outras agents pelo menor número
- * de leads em aberto; os demais em aberto voltam para a gestora; fechados ficam; o acesso é revogado.
+ * Saída de corretor com redistribuição (migrations 90004 e 90005).
+ * Admin tira a corretora A: leads em Novo/Não atendeu são divididos SÓ entre os membros ativos do grupo do
+ * empreendimento do lead (menor número de leads em aberto); os demais em aberto — e qualquer lead sem destino
+ * no empreendimento, ou de equipe com verba própria — voltam para a gestora; fechados ficam.
  */
 const pool = new Pool({
   connectionString: `postgresql://postgres:postgres@127.0.0.1:${process.env.TEST_DB_PORT}/postgres`,
@@ -40,6 +41,7 @@ async function asUser(user: string, text: string, args: unknown[] = []) {
 }
 
 const agentC = "cccccccc-1111-4000-8000-0000000000c1";
+const agentD = "cccccccc-1111-4000-8000-0000000000d1";
 const TITLE = "lead-saida";
 
 async function stageId(slug: string): Promise<string> {
@@ -47,13 +49,26 @@ async function stageId(slug: string): Promise<string> {
   return r.rows[0].id as string;
 }
 
-async function lead(owner: string, slug: string, status = "open") {
+async function lead(owner: string, slug: string, status = "open", emp: string | null = "Alves Guimarães") {
   const r = await query(
-    `insert into crm_leads(organization_id,pipeline_id,stage_id,title,source,owner_user_id,owner_kind,status)
-     values($1,$2,$3,$4,'manual',$5,'user',$6) returning id`,
-    [org, pipeline, await stageId(slug), TITLE, owner, status],
+    `insert into crm_leads(organization_id,pipeline_id,stage_id,title,source,owner_user_id,owner_kind,status,custom_fields)
+     values($1,$2,$3,$4,'manual',$5,'user',$6,$7::jsonb) returning id`,
+    [org, pipeline, await stageId(slug), TITLE, owner, status, JSON.stringify(emp ? { empreendimento: emp } : {})],
   );
   return r.rows[0].id as string;
+}
+
+/** Grupo de empreendimento com os membros dados, na ordem. */
+async function grupo(name: string, members: string[], saidaParaGestora = false) {
+  const g = await query(
+    "insert into lead_routing_groups(organization_id,name,saida_para_gestora) values($1,$2,$3) returning id",
+    [org, name, saidaParaGestora],
+  );
+  const id = g.rows[0].id as string;
+  for (const [i, u] of members.entries()) {
+    await query("insert into lead_routing_group_members(organization_id,group_id,user_id,position) values($1,$2,$3,$4)", [org, id, u, i]);
+  }
+  return id;
 }
 const ownerOf = async (id: string) => (await query("select owner_user_id from crm_leads where id=$1", [id])).rows[0].owner_user_id as string;
 const leave = (actor: string, user: string, gestor: string, dry = false) =>
@@ -63,6 +78,8 @@ beforeAll(async () => {
   seedGov();
   await query("insert into auth.users(id,email) values($1,'gov-agent-c@invariant.test') on conflict do nothing", [agentC]);
   await query("insert into user_organizations(user_id,organization_id,role,accepted_at) values($1,$2,'agent',now()) on conflict do nothing", [agentC, org]);
+  await query("insert into auth.users(id,email) values($1,'gov-agent-d@invariant.test') on conflict do nothing", [agentD]);
+  await query("insert into user_organizations(user_id,organization_id,role,accepted_at) values($1,$2,'agent',now()) on conflict do nothing", [agentD, org]);
   for (const [slug, pos, won, lost] of [
     ["novo", 9100, false, false],
     ["nao_atendeu", 9200, false, false],
@@ -79,11 +96,13 @@ beforeAll(async () => {
 afterAll(() => pool.end());
 beforeEach(async () => {
   await query("delete from crm_leads where organization_id=$1 and title=$2", [org, TITLE]);
-  await query("update user_organizations set revoked_at=null where organization_id=$1 and user_id=any($2)", [org, [leaver, agentB, agentC]]);
+  await query("delete from lead_routing_groups where organization_id=$1", [org]);
+  await query("update user_organizations set revoked_at=null where organization_id=$1 and user_id=any($2)", [org, [leaver, agentB, agentC, agentD]]);
 });
 
 describe("fn_member_leave", () => {
   it("dry-run só conta: nada muda e a corretora continua ativa", async () => {
+    await grupo("Alves Guimarães", [leaver, agentB, agentC]);
     await lead(leaver, "novo");
     await lead(leaver, "novo");
     await lead(leaver, "nao_atendeu");
@@ -96,7 +115,8 @@ describe("fn_member_leave", () => {
     expect(m.rows[0].revoked_at).toBeNull();
   });
 
-  it("divide Novo/Não atendeu entre as outras agents, devolve o resto à gestora, não toca em fechado e revoga", async () => {
+  it("divide Novo/Não atendeu só entre os membros do grupo do empreendimento, devolve o resto à gestora e revoga", async () => {
+    await grupo("Alves Guimarães", [leaver, agentB, agentC]);
     const novo1 = await lead(leaver, "novo");
     const novo2 = await lead(leaver, "novo");
     const naoAt = await lead(leaver, "nao_atendeu");
@@ -104,11 +124,11 @@ describe("fn_member_leave", () => {
     const fechado = await lead(leaver, "fechou", "won");
 
     const r = await leave(admin, leaver, manager);
-    expect(r).toMatchObject({ revogado: true, divididos: 3, com_a_gestora: 1 });
+    expect(r).toMatchObject({ revogado: true, divididos: 3, com_a_gestora: 1, motivos: { em_andamento: 1 } });
 
     const donosDivididos = [await ownerOf(novo1), await ownerOf(novo2), await ownerOf(naoAt)];
     expect(donosDivididos.every((d) => d === agentB || d === agentC)).toBe(true);
-    expect(new Set(donosDivididos).size).toBe(2); // as duas receberam
+    expect(new Set(donosDivididos).size).toBe(2);
     expect(await ownerOf(atendeu)).toBe(manager);
     expect(await ownerOf(fechado)).toBe(leaver);
 
@@ -129,23 +149,65 @@ describe("fn_member_leave", () => {
     expect(assigned.rows[0].n).toBe(4);
   });
 
-  it("quem tem menos leads em aberto recebe primeiro", async () => {
+  it("quem NÃO atende ao empreendimento nunca recebe o lead dele", async () => {
+    await grupo("Alves Guimarães", [leaver, agentB]);
+    await grupo("Sarutaiá", [agentC, agentD]);
+    const a = await lead(leaver, "novo", "open", "Alves Guimarães");
+    const b = await lead(leaver, "novo", "open", "Alves Guimarães");
+    await leave(admin, leaver, manager);
+    expect([await ownerOf(a), await ownerOf(b)]).toEqual([agentB, agentB]);
+  });
+
+  it("o nome do empreendimento casa ignorando maiúsculas e espaços nas pontas", async () => {
+    await grupo("Alves Guimarães", [leaver, agentB]);
+    const a = await lead(leaver, "novo", "open", "  ALVES GUIMARÃES ");
+    await leave(admin, leaver, manager);
+    expect(await ownerOf(a)).toBe(agentB);
+  });
+
+  it("equipe com verba própria (Sarutaiá): Novo/Não atendeu voltam para a gestora, com o motivo", async () => {
+    await grupo("Sarutaiá", [leaver, agentB, agentC], true);
+    const a = await lead(leaver, "novo", "open", "Sarutaiá");
+    const b = await lead(leaver, "nao_atendeu", "open", "Sarutaiá");
+    const r = await leave(admin, leaver, manager);
+    expect(r).toMatchObject({ divididos: 0, com_a_gestora: 2, motivos: { equipe_com_verba_propria: 2 } });
+    expect([await ownerOf(a), await ownerOf(b)]).toEqual([manager, manager]);
+    const ev = await query("select detail from lead_ownership_events where lead_id=$1", [a]);
+    expect(ev.rows[0].detail).toMatchObject({ motivo: "equipe_com_verba_propria" });
+  });
+
+  it("lead sem empreendimento, ou de empreendimento sem grupo, volta para a gestora", async () => {
+    await grupo("Alves Guimarães", [leaver, agentB]);
+    const semEmp = await lead(leaver, "novo", "open", null);
+    const outro = await lead(leaver, "novo", "open", "Empreendimento que não existe");
+    const r = await leave(admin, leaver, manager);
+    expect(r).toMatchObject({ divididos: 0, com_a_gestora: 2, motivos: { sem_destino_no_empreendimento: 2 } });
+    expect([await ownerOf(semEmp), await ownerOf(outro)]).toEqual([manager, manager]);
+  });
+
+  it("membro pausado ou revogado não recebe; sem ninguém elegível, vai para a gestora", async () => {
+    const g = await grupo("Alves Guimarães", [leaver, agentB, agentC, agentD]);
+    await query("update lead_routing_group_members set active=false where group_id=$1 and user_id=$2", [g, agentB]);
+    await query("update user_organizations set revoked_at=now() where organization_id=$1 and user_id=$2", [org, agentC]);
+    const a = await lead(leaver, "novo");
+    await leave(admin, leaver, manager);
+    expect(await ownerOf(a)).toBe(agentD);
+
+    await query("update user_organizations set revoked_at=null where organization_id=$1 and user_id=$2", [org, leaver]);
+    await query("update lead_routing_group_members set active=false where group_id=$1 and user_id=$2", [g, agentD]);
+    const b = await lead(leaver, "novo");
+    await leave(admin, leaver, manager);
+    expect(await ownerOf(b)).toBe(manager);
+  });
+
+  it("quem tem menos leads em aberto recebe primeiro, dentro do grupo", async () => {
+    await grupo("Alves Guimarães", [leaver, agentB, agentC]);
     for (let i = 0; i < 5; i++) await lead(agentB, "atendeu");
     const a = await lead(leaver, "novo");
     const b = await lead(leaver, "novo");
     const c = await lead(leaver, "novo");
     await leave(admin, leaver, manager);
     expect([await ownerOf(a), await ownerOf(b), await ownerOf(c)]).toEqual([agentC, agentC, agentC]);
-  });
-
-  it("sem nenhuma agent ativa, tudo volta para a gestora com o motivo registrado", async () => {
-    await query("update user_organizations set revoked_at=now() where organization_id=$1 and user_id=any($2)", [org, [agentB, agentC]]);
-    const a = await lead(leaver, "novo");
-    const r = await leave(admin, leaver, manager);
-    expect(r).toMatchObject({ divididos: 0, com_a_gestora: 1 });
-    expect(await ownerOf(a)).toBe(manager);
-    const ev = await query("select detail from lead_ownership_events where lead_id=$1", [a]);
-    expect(ev.rows[0].detail).toMatchObject({ motivo: "sem_corretora_ativa" });
   });
 
   it("só admin executa; não dá para tirar a si mesmo; a gestora tem de ser gerente/admin ativo", async () => {

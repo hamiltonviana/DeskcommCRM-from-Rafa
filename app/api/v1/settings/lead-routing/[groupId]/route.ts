@@ -38,7 +38,7 @@ export async function PATCH(req: Request, ctx: Ctx): Promise<Response> {
     .update({ ...parsed.data, updated_at: new Date().toISOString() })
     .eq("id", groupId)
     .eq("organization_id", auth.org.orgId)
-    .select("id, name, active")
+    .select("id, name, active, saida_para_gestora")
     .maybeSingle();
   if (error) {
     if (error.code === "23505") return fail("conflict", "Já existe um grupo com esse nome.", 409, { requestId });
